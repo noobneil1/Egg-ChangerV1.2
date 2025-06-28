@@ -1,100 +1,176 @@
-local replicatedStorage = game:GetService("ReplicatedStorage")
-local collectionService = game:GetService("CollectionService")
-local players = game:GetService("Players")
-local runService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
+local player = Players.LocalPlayer
 
-local localPlayer = players.LocalPlayer
-local currentCamera = workspace.CurrentCamera
+local RANDOMIZE_INTERVAL = 30
+local EGG_NAMES = { "Bug Egg", "Night Egg", "Mythical Egg" }
 
-local hatchFunction = getupvalue(getupvalue(getconnections(replicatedStorage.GameEvents.PetEggService.OnClientEvent)[1].Function, 1), 2)
-local eggModels = getupvalue(hatchFunction, 1)
-local eggPets = getupvalue(hatchFunction, 2)
+local PET_POOL = {
+    ["Bug Egg"] = {"Snail", "Caterpillar", "Giant Ant"},
+    ["Night Egg"] = {"Hedgehog", "Frog", "Echo Frog", "Blood Hedgehog", "Blood Kiwi"},
+    ["Mythical Egg"] = {"Squirrel", "Red Giant Ant", "Grey Mouse"},
+}
 
-local espCache = {}
-local activeEggs = {}
+local eggData = {}
+local running = true
 
-local function getObjectFromId(objectId)
-    for eggModel in eggModels do
-        if eggModel:GetAttribute("OBJECT_UUID") ~= objectId then continue end
-        return eggModel
+local function randomChoice(list)
+    return list[math.random(1, #list)]
+end
+
+local function ensureStringValue(parent, name)
+    local val = parent:FindFirstChild(name)
+    if not val then
+        val = Instance.new("StringValue")
+        val.Name = name
+        val.Value = ""
+        val.Parent = parent
+    end
+    return val
+end
+
+-- 🟡 Automatically tag egg you touch
+local function autoTagEgg(egg)
+    if not egg:FindFirstChild("Owner") then
+        local ownerVal = Instance.new("StringValue")
+        ownerVal.Name = "Owner"
+        ownerVal.Value = tostring(player.UserId)
+        ownerVal.Parent = egg
     end
 end
 
-local function UpdateEsp(objectId, petName)
-    local object = getObjectFromId(objectId)
-    if not object or not espCache[objectId] then return end
-
-    local eggName = object:GetAttribute("EggName")
-    espCache[objectId].Text = `{eggName} | {petName}`
+local function isOwnedByLocalPlayer(egg)
+    local owner = egg:FindFirstChild("Owner")
+    return owner and owner.Value == tostring(player.UserId)
 end
 
-local function AddEsp(object)
-    if object:GetAttribute("OWNER") ~= localPlayer.Name then return end
+local function createEggUI(egg, part)
+    local gui = Instance.new("BillboardGui")
+    gui.Name = "PetUI_" .. egg:GetFullName()
+    gui.Adornee = part
+    gui.Size = UDim2.new(0, 180, 0, 60)
+    gui.StudsOffset = Vector3.new(0, 3, 0)
+    gui.AlwaysOnTop = true
+    gui.Parent = player:WaitForChild("PlayerGui")
 
-    local eggName = object:GetAttribute("EggName")
-    local petName = eggPets[object:GetAttribute("OBJECT_UUID")]
-   
-    local objectId = object:GetAttribute("OBJECT_UUID")
-    if not objectId then return end
+    local label = Instance.new("TextLabel")
+    label.Name = "Label"
+    label.Size = UDim2.new(1, 0, 1, 0)
+    label.BackgroundTransparency = 1
+    label.TextScaled = true
+    label.Font = Enum.Font.GothamBold
+    label.TextColor3 = Color3.new(1, 1, 0)
+    label.Parent = gui
 
-    local label = Drawing.new("Text")
-    label.Text = `{eggName} | {petName or "?"}`
-    label.Size = 18
-    label.Color = Color3.new(1, 1, 1)
-    label.Outline = true
-    label.OutlineColor = Color3.new(0, 0, 0)
-    label.Center = true
-    label.Visible = false
-
-    espCache[objectId] = label
-    activeEggs[objectId] = object
+    return gui
 end
 
-local function RemoveEsp(object)
-    if object:GetAttribute("OWNER") ~= localPlayer.Name then return end
+local function updateEggUI(egg)
+    if not isOwnedByLocalPlayer(egg) then return end
 
-    local objectId = object:GetAttribute("OBJECT_UUID")
-    if espCache[objectId] then
-        espCache[objectId]:Remove()
-        espCache[objectId] = nil
+    local part = egg:FindFirstChildWhichIsA("BasePart")
+    if not part then return end
+
+    local currentPet = ensureStringValue(egg, "CurrentPet")
+    local guiName = "PetUI_" .. egg:GetFullName()
+    local ui = player.PlayerGui:FindFirstChild(guiName) or createEggUI(egg, part)
+    local label = ui:FindFirstChild("Label")
+
+    local timeLeft = eggData[egg] and eggData[egg].Countdown or RANDOMIZE_INTERVAL
+    if label then
+        label.Text = egg.Name .. " → " .. currentPet.Value .. "\nChanging in: " .. timeLeft .. "s"
     end
-   
-    activeEggs[objectId] = nil
 end
 
-local function UpdateAllEsp()
-    for objectId, object in activeEggs do
-        if not object or not object:IsDescendantOf(workspace) then
-            activeEggs[objectId] = nil
-            if espCache[objectId] then
-                espCache[objectId].Visible = false
+local function setupEgg(egg)
+    if not eggData[egg] and isOwnedByLocalPlayer(egg) then
+        eggData[egg] = {Countdown = RANDOMIZE_INTERVAL}
+        local currentPet = ensureStringValue(egg, "CurrentPet")
+        currentPet.Value = randomChoice(PET_POOL[egg.Name])
+        updateEggUI(egg)
+    end
+end
+
+local function scanForEggs()
+    for _, egg in ipairs(Workspace:GetDescendants()) do
+        if table.find(EGG_NAMES, egg.Name) then
+            local basePart = egg:FindFirstChildWhichIsA("BasePart")
+            if basePart then
+                basePart.Touched:Connect(function(hit)
+                    if hit:IsDescendantOf(player.Character or player.CharacterAdded:Wait()) then
+                        autoTagEgg(egg)
+                        setupEgg(egg)
+                    end
+                end)
             end
-            continue
-        end
-
-        local label = espCache[objectId]
-        if label then
-            local pos, onScreen = currentCamera:WorldToViewportPoint(object:GetPivot().Position)
-            if onScreen then
-                label.Position = Vector2.new(pos.X, pos.Y)
-                label.Visible = true
-            else
-                label.Visible = false
-            end
         end
     end
 end
 
-for _, object in collectionService:GetTagged("PetEggServer") do
-    task.spawn(AddEsp, object)
+local function createControlPanel()
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "EggControlGui"
+    gui.ResetOnSpawn = false
+    gui.Parent = player:WaitForChild("PlayerGui")
+
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 150, 0, 100)
+    frame.Position = UDim2.new(0.05, 0, 0.15, 0)
+    frame.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+    frame.BorderSizePixel = 0
+    frame.Active = true
+    frame.Draggable = true
+    frame.Parent = gui
+
+    local stopButton = Instance.new("TextButton")
+    stopButton.Size = UDim2.new(1, -10, 0, 40)
+    stopButton.Position = UDim2.new(0, 5, 0, 5)
+    stopButton.BackgroundColor3 = Color3.fromRGB(255, 60, 60)
+    stopButton.Text = "🛑 Stop"
+    stopButton.TextColor3 = Color3.new(1, 1, 1)
+    stopButton.Font = Enum.Font.GothamBold
+    stopButton.TextScaled = true
+    stopButton.Parent = frame
+
+    local resumeButton = Instance.new("TextButton")
+    resumeButton.Size = UDim2.new(1, -10, 0, 40)
+    resumeButton.Position = UDim2.new(0, 5, 0, 50)
+    resumeButton.BackgroundColor3 = Color3.fromRGB(60, 200, 60)
+    resumeButton.Text = "▶️ Resume"
+    resumeButton.TextColor3 = Color3.new(1, 1, 1)
+    resumeButton.Font = Enum.Font.GothamBold
+    resumeButton.TextScaled = true
+    resumeButton.Parent = frame
+
+    stopButton.MouseButton1Click:Connect(function()
+        running = false
+    end)
+
+    resumeButton.MouseButton1Click:Connect(function()
+        running = true
+    end)
 end
 
-collectionService:GetInstanceAddedSignal("PetEggServer"):Connect(AddEsp)
-collectionService:GetInstanceRemovedSignal("PetEggServer"):Connect(RemoveEsp)
+spawn(function()
+    while true do
+        if running then
+            for egg, data in pairs(eggData) do
+                data.Countdown -= 1
+                if data.Countdown <= 0 then
+                    local currentPet = ensureStringValue(egg, "CurrentPet")
+                    currentPet.Value = randomChoice(PET_POOL[egg.Name])
+                    data.Countdown = RANDOMIZE_INTERVAL
+                end
+                updateEggUI(egg)
+            end
+        else
+            for egg in pairs(eggData) do
+                updateEggUI(egg)
+            end
+        end
+        wait(1)
+    end
+end)
 
-local old; old = hookfunction(getconnections(replicatedStorage.GameEvents.EggReadyToHatch_RE.OnClientEvent)[1].Function, newcclosure(function(objectId, petName)
-    UpdateEsp(objectId, petName)
-    return old(objectId, petName)
-end))
-
-runService.PreRender:Connect(UpdateAllEsp)
+createControlPanel()
+scanForEggs()
